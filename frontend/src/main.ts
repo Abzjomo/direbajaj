@@ -1,9 +1,21 @@
 import QRCode from "qrcode";
 
 const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3001";
-const publicBookingUrl = window.location.origin;
+const publicBookingUrl = `${window.location.origin}/?view=customer`;
 
 const root = document.getElementById("app") || document.getElementById("root");
+
+function getView() {
+  const url = new URL(window.location.href);
+  return url.searchParams.get("view") || "customer";
+}
+
+function setView(view: string) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", view);
+  window.history.pushState({}, "", url.toString());
+  load();
+}
 
 function getLoggedInDriverId() {
   return localStorage.getItem("driverId") || "";
@@ -13,39 +25,115 @@ function setDriver(id: string) {
   localStorage.setItem("driverId", id);
 }
 
-function logout() {
+function logoutDriver() {
   localStorage.removeItem("driverId");
+}
+
+function navHtml(activeView: string) {
+  const item = (view: string, label: string) => `
+    <button
+      onclick="changeView('${view}')"
+      style="
+        padding:10px 14px;
+        border:none;
+        border-radius:10px;
+        cursor:pointer;
+        background:${activeView === view ? "#111" : "#e9e9e9"};
+        color:${activeView === view ? "white" : "#111"};
+        font-weight:600;
+      "
+    >
+      ${label}
+    </button>
+  `;
+
+  return `
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px;">
+      ${item("customer", "Customer")}
+      ${item("driver", "Driver")}
+      ${item("admin", "Admin")}
+    </div>
+  `;
+}
+
+function layout(inner: string, backendOk: boolean) {
+  return `
+    <div style="font-family: Arial; background:#f5f5f5; min-height:100vh; padding:20px;">
+      <div style="max-width:760px; margin:0 auto;">
+        <h1 style="text-align:center; margin-bottom:20px;">🚀 DireBajaj</h1>
+        ${navHtml(getView())}
+        ${inner}
+        <p style="text-align:center; margin-top:20px;">
+          Backend: <strong>${backendOk ? "Running" : "Error"}</strong>
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+function card(title: string, body: string) {
+  return `
+    <div style="background:white; padding:20px; border-radius:14px; margin-top:20px; box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+      <h3 style="margin-top:0;">${title}</h3>
+      ${body}
+    </div>
+  `;
 }
 
 async function load() {
   if (!root) return;
 
-  const healthRes = await fetch(`${apiBase}/health`);
-  const healthData = await healthRes.json();
+  try {
+    const healthRes = await fetch(`${apiBase}/health`);
+    const healthData = await healthRes.json();
 
-  root.innerHTML = `
-    <div style="font-family: Arial; background:#f5f5f5; min-height:100vh; padding:20px; max-width:700px; margin:0 auto;">
-      
-      <h1 style="text-align:center;">🚀 DireBajaj</h1>
+    const view = getView();
 
-      <div style="background:white; padding:20px; border-radius:12px; margin-top:20px;">
-        <h3>Public Booking QR</h3>
-        <p>Scan this QR to open booking page:</p>
+    if (view === "customer") {
+      root.innerHTML = layout(renderCustomerView(), !!healthData.ok);
+      await renderQrCode();
+      await loadCustomerDrivers();
+      await loadCustomerBookings();
+    } else if (view === "driver") {
+      root.innerHTML = layout(renderDriverView(), !!healthData.ok);
+      await loadDriverLoginOptions();
+      await loadLoggedInDriverPanel();
+    } else {
+      root.innerHTML = layout(renderAdminView(), !!healthData.ok);
+      await loadAdminBookings();
+      await loadAdminDrivers();
+    }
+  } catch (error) {
+    if (!root) return;
+    root.innerHTML = `
+      <div style="font-family: Arial; padding: 40px;">
+        <h1>DireBajaj 🚀</h1>
+        <p style="color:red;">Could not load app.</p>
+      </div>
+    `;
+  }
+}
+
+function renderCustomerView() {
+  return `
+    ${card(
+      "Public Booking QR",
+      `
+        <p>Scan this QR to open customer booking page:</p>
         <div style="display:flex; justify-content:center; margin:20px 0;">
           <canvas id="qrCanvas"></canvas>
         </div>
         <div style="padding:12px; background:#f0f0f0; border-radius:8px; word-break:break-all;">
           ${publicBookingUrl}
         </div>
-        <button onclick="copyBookingLink()" style="margin-top:10px; padding:10px;">
-          Copy booking link
-        </button>
+        <button onclick="copyBookingLink()" style="margin-top:10px; padding:10px 14px;">Copy booking link</button>
         <p id="copyMessage" style="margin-top:10px;"></p>
-      </div>
+      `
+    )}
 
-      <div style="background:white; padding:20px; border-radius:12px; margin-top:20px;">
-        <h3>Book Ride</h3>
-
+    ${card(
+      "Book Ride",
+      `
         <input id="from" placeholder="From" style="width:100%; padding:12px; margin-bottom:10px;" />
         <input id="to" placeholder="To" style="width:100%; padding:12px; margin-bottom:10px;" />
 
@@ -53,54 +141,53 @@ async function load() {
           <option value="">Auto assign driver</option>
         </select>
 
-        <button onclick="book()" style="width:100%; padding:15px; background:black; color:white; border:none; border-radius:8px;">
+        <button onclick="bookRide()" style="width:100%; padding:15px; background:black; color:white; border:none; border-radius:8px;">
           Book Now
         </button>
 
         <p id="message" style="margin-top:10px;"></p>
-      </div>
+      `
+    )}
 
-      <div style="background:white; padding:20px; border-radius:12px; margin-top:20px;">
-        <h3>Bookings</h3>
-        <ul id="list"></ul>
-      </div>
+    ${card("Recent Bookings", `<ul id="customerBookings"></ul>`)}
+  `;
+}
 
-      <div style="background:white; padding:20px; border-radius:12px; margin-top:20px;">
-        <h3>Drivers</h3>
-        <ul id="drivers"></ul>
-
-        <button onclick="resetDrivers()" style="margin-top:10px; padding:10px;">
-          Reset drivers
-        </button>
-      </div>
-
-      <div style="background:white; padding:20px; border-radius:12px; margin-top:20px;">
-        <h3>Driver Login</h3>
-
+function renderDriverView() {
+  return `
+    ${card(
+      "Driver Login",
+      `
         <select id="driverLoginSelect" style="width:100%; padding:12px; margin-bottom:10px;">
           <option value="">Choose driver</option>
         </select>
 
-        <button onclick="loginDriver()" style="padding:10px;">Login</button>
-        <button onclick="logoutDriverPanel()" style="padding:10px; margin-left:10px;">Logout</button>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button onclick="loginDriver()" style="padding:10px 14px;">Login</button>
+          <button onclick="logoutDriverPanel()" style="padding:10px 14px;">Logout</button>
+        </div>
 
-        <p id="loginMessage"></p>
+        <p id="loginMessage" style="margin-top:12px;"></p>
+      `
+    )}
 
-        <h4>Your bookings</h4>
-        <ul id="driverBookings"></ul>
-      </div>
-
-      <p style="text-align:center; margin-top:20px;">
-        Backend: ${healthData.ok ? "Running" : "Error"}
-      </p>
-
-    </div>
+    ${card("Your Bookings", `<ul id="driverBookings"></ul>`)}
   `;
+}
 
-  await renderQrCode();
-  await loadBookings();
-  await loadDrivers();
-  await loadLoggedInDriverPanel();
+function renderAdminView() {
+  return `
+    ${card("All Bookings", `<ul id="adminBookings"></ul>`)}
+
+    ${card(
+      "Drivers",
+      `
+        <ul id="adminDrivers"></ul>
+        <button onclick="resetDrivers()" style="margin-top:10px; padding:10px 14px;">Reset drivers</button>
+        <p id="adminMessage" style="margin-top:10px;"></p>
+      `
+    )}
+  `;
 }
 
 async function renderQrCode() {
@@ -113,55 +200,93 @@ async function renderQrCode() {
   });
 }
 
-async function loadBookings() {
+async function loadCustomerDrivers() {
+  const res = await fetch(`${apiBase}/drivers`);
+  const drivers = await res.json();
+
+  const select = document.getElementById("driverSelect") as HTMLSelectElement | null;
+  if (!select) return;
+
+  select.innerHTML =
+    `<option value="">Auto assign driver</option>` +
+    drivers
+      .filter((d: any) => d.status === "available")
+      .map((d: any) => `<option value="${d.id}">${d.name} - ${d.area}</option>`)
+      .join("");
+}
+
+async function loadCustomerBookings() {
   const res = await fetch(`${apiBase}/bookings`);
   const bookings = await res.json();
-  const list = document.getElementById("list");
 
+  const list = document.getElementById("customerBookings");
   if (!list) return;
 
   list.innerHTML = bookings.length
     ? bookings
-        .map((b: any) => `
-          <li style="margin-bottom:10px;">
-            ${b.from} → ${b.to} (${b.driver}) [${b.status}]
-            ${b.status !== "completed" ? `<button onclick="completeBooking(${b.id})">✔</button>` : ""}
-          </li>
-        `)
+        .slice(0, 8)
+        .map(
+          (b: any) => `
+            <li style="margin-bottom:10px;">
+              ${b.from} → ${b.to} (${b.driver || "none"}) [${b.status}]
+            </li>
+          `
+        )
         .join("")
     : "<li>No bookings yet</li>";
 }
 
-async function loadDrivers() {
+async function loadAdminBookings() {
+  const res = await fetch(`${apiBase}/bookings`);
+  const bookings = await res.json();
+
+  const list = document.getElementById("adminBookings");
+  if (!list) return;
+
+  list.innerHTML = bookings.length
+    ? bookings
+        .map(
+          (b: any) => `
+            <li style="margin-bottom:10px;">
+              ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
+              ${
+                b.status !== "completed"
+                  ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
+                  : ""
+              }
+            </li>
+          `
+        )
+        .join("")
+    : "<li>No bookings yet</li>";
+}
+
+async function loadAdminDrivers() {
   const res = await fetch(`${apiBase}/drivers`);
   const drivers = await res.json();
 
-  const list = document.getElementById("drivers");
-  const select = document.getElementById("driverSelect") as HTMLSelectElement | null;
-  const loginSelect = document.getElementById("driverLoginSelect") as HTMLSelectElement | null;
+  const list = document.getElementById("adminDrivers");
+  if (!list) return;
 
-  if (list) {
-    list.innerHTML = drivers.length
-      ? drivers.map((d: any) => `<li>${d.name} (${d.status})</li>`).join("")
-      : "<li>No drivers found</li>";
-  }
+  list.innerHTML = drivers.length
+    ? drivers
+        .map((d: any) => `<li style="margin-bottom:8px;">${d.name} - ${d.area} (${d.status})</li>`)
+        .join("")
+    : "<li>No drivers found</li>";
+}
 
-  if (select) {
-    select.innerHTML =
-      `<option value="">Auto assign</option>` +
-      drivers
-        .filter((d: any) => d.status === "available")
-        .map((d: any) => `<option value="${d.id}">${d.name}</option>`)
-        .join("");
-  }
+async function loadDriverLoginOptions() {
+  const res = await fetch(`${apiBase}/drivers`);
+  const drivers = await res.json();
 
-  if (loginSelect) {
-    const currentValue = getLoggedInDriverId();
-    loginSelect.innerHTML =
-      `<option value="">Choose driver</option>` +
-      drivers.map((d: any) => `<option value="${d.id}">${d.name}</option>`).join("");
-    loginSelect.value = currentValue;
-  }
+  const select = document.getElementById("driverLoginSelect") as HTMLSelectElement | null;
+  if (!select) return;
+
+  const currentValue = getLoggedInDriverId();
+  select.innerHTML =
+    `<option value="">Choose driver</option>` +
+    drivers.map((d: any) => `<option value="${d.id}">${d.name} - ${d.area}</option>`).join("");
+  select.value = currentValue;
 }
 
 async function loadLoggedInDriverPanel() {
@@ -190,10 +315,27 @@ async function loadLoggedInDriverPanel() {
 
   if (list) {
     list.innerHTML = mine.length
-      ? mine.map((b: any) => `<li>${b.from} → ${b.to} (${b.status})</li>`).join("")
+      ? mine
+          .map(
+            (b: any) => `
+              <li style="margin-bottom:10px;">
+                ${b.from} → ${b.to} [${b.status}]
+                ${
+                  b.status !== "completed"
+                    ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
+                    : ""
+                }
+              </li>
+            `
+          )
+          .join("")
       : "<li>No bookings for this driver</li>";
   }
 }
+
+(window as any).changeView = function (view: string) {
+  setView(view);
+};
 
 (window as any).copyBookingLink = async function () {
   const msg = document.getElementById("copyMessage");
@@ -202,6 +344,33 @@ async function loadLoggedInDriverPanel() {
     if (msg) msg.innerHTML = "✅ Booking link copied";
   } catch {
     if (msg) msg.innerHTML = "❌ Could not copy link";
+  }
+};
+
+(window as any).bookRide = async function () {
+  const from = (document.getElementById("from") as HTMLInputElement).value;
+  const to = (document.getElementById("to") as HTMLInputElement).value;
+  const driverId = (document.getElementById("driverSelect") as HTMLSelectElement).value;
+  const message = document.getElementById("message");
+
+  try {
+    const res = await fetch(`${apiBase}/book`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to, driverId }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      if (message) message.innerHTML = `✅ Booking saved (Driver: ${data.booking.driver})`;
+      await loadCustomerBookings();
+      await loadCustomerDrivers();
+    } else {
+      if (message) message.innerHTML = `❌ ${data.error || "Error"}`;
+    }
+  } catch {
+    if (message) message.innerHTML = `❌ Could not connect to backend`;
   }
 };
 
@@ -219,41 +388,47 @@ async function loadLoggedInDriverPanel() {
 };
 
 (window as any).logoutDriverPanel = async function () {
-  logout();
+  logoutDriver();
   await loadLoggedInDriverPanel();
-  await loadDrivers();
-};
-
-(window as any).book = async function () {
-  const from = (document.getElementById("from") as HTMLInputElement).value;
-  const to = (document.getElementById("to") as HTMLInputElement).value;
-  const driverId = (document.getElementById("driverSelect") as HTMLSelectElement).value;
-  const message = document.getElementById("message");
-
-  const res = await fetch(`${apiBase}/book`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ from, to, driverId }),
-  });
-
-  const data = await res.json();
-
-  if (data.ok) {
-    if (message) message.innerHTML = `✅ Booking saved (Driver: ${data.booking.driver})`;
-    await load();
-  } else {
-    if (message) message.innerHTML = `❌ ${data.error}`;
-  }
+  await loadDriverLoginOptions();
 };
 
 (window as any).resetDrivers = async function () {
   await fetch(`${apiBase}/reset-drivers`, { method: "POST" });
-  await load();
+
+  const msg = document.getElementById("adminMessage");
+  if (msg) msg.innerHTML = "✅ Drivers reset";
+
+  if (getView() === "admin") {
+    await loadAdminDrivers();
+  }
+  if (getView() === "customer") {
+    await loadCustomerDrivers();
+  }
+  if (getView() === "driver") {
+    await loadDriverLoginOptions();
+    await loadLoggedInDriverPanel();
+  }
 };
 
 (window as any).completeBooking = async function (id: number) {
   await fetch(`${apiBase}/complete-booking/${id}`, { method: "POST" });
-  await load();
+
+  if (getView() === "admin") {
+    await loadAdminBookings();
+    await loadAdminDrivers();
+  }
+  if (getView() === "driver") {
+    await loadLoggedInDriverPanel();
+  }
+  if (getView() === "customer") {
+    await loadCustomerBookings();
+    await loadCustomerDrivers();
+  }
 };
+
+window.addEventListener("popstate", () => {
+  load();
+});
 
 load();
