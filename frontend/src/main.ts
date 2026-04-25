@@ -1,6 +1,6 @@
 import QRCode from "qrcode";
 
-const apiBase = "http://localhost:3001";
+const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3001";
 const publicBookingUrl = window.location.origin;
 
 const root = document.getElementById("app") || document.getElementById("root");
