@@ -23,18 +23,6 @@ function setView(view: string) {
   load();
 }
 
-function getLoggedInDriverId() {
-  return localStorage.getItem("driverId") || "";
-}
-
-function setDriver(id: string) {
-  localStorage.setItem("driverId", id);
-}
-
-function logoutDriver() {
-  localStorage.removeItem("driverId");
-}
-
 function getAdminToken() {
   return localStorage.getItem("adminToken") || "";
 }
@@ -49,6 +37,18 @@ function isAdminLoggedIn() {
 
 function logoutAdmin() {
   localStorage.removeItem("adminToken");
+}
+
+function getDriverToken() {
+  return localStorage.getItem("driverToken") || "";
+}
+
+function setDriverToken(token: string) {
+  localStorage.setItem("driverToken", token);
+}
+
+function logoutDriver() {
+  localStorage.removeItem("driverToken");
 }
 
 async function adminFetch(url: string, options: RequestInit = {}) {
@@ -69,6 +69,28 @@ async function adminFetch(url: string, options: RequestInit = {}) {
     logoutAdmin();
     setView("admin");
     throw new Error("Admin session expired or unauthorized");
+  }
+
+  return res;
+}
+
+async function driverFetch(url: string, options: RequestInit = {}) {
+  const token = getDriverToken();
+
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  const res = await fetch(url, {
+    ...options,
+    headers,
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    logoutDriver();
+    throw new Error("Driver session expired or unauthorized");
   }
 
   return res;
@@ -221,6 +243,13 @@ function renderDriverView() {
           <option value="">Choose driver</option>
         </select>
 
+        <input
+          id="driverPassword"
+          type="password"
+          placeholder="Driver password"
+          style="width:100%; padding:12px; margin-bottom:10px;"
+        />
+
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <button onclick="loginDriver()" style="padding:10px 14px;">Login</button>
           <button onclick="logoutDriverPanel()" style="padding:10px 14px;">Logout</button>
@@ -354,7 +383,7 @@ async function loadAdminBookings() {
                 ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
                 ${
                   b.status !== "completed"
-                    ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
+                    ? `<button onclick="completeBooking('${b.id}')" style="margin-left:10px;">Complete</button>`
                     : ""
                 }
               </li>
@@ -392,49 +421,56 @@ async function loadDriverLoginOptions() {
   const select = document.getElementById("driverLoginSelect") as HTMLSelectElement | null;
   if (!select) return;
 
-  const currentValue = getLoggedInDriverId();
   select.innerHTML =
     `<option value="">Choose driver</option>` +
     drivers.map((d: any) => `<option value="${d.id}">${d.name} - ${d.area}</option>`).join("");
-  select.value = currentValue;
 }
 
 async function loadLoggedInDriverPanel() {
-  const driverId = getLoggedInDriverId();
   const list = document.getElementById("driverBookings");
   const loginMessage = document.getElementById("loginMessage");
 
-  if (!driverId) {
+  const token = getDriverToken();
+
+  if (!token) {
     if (list) list.innerHTML = "";
     if (loginMessage) loginMessage.innerHTML = "No driver logged in";
     return;
   }
 
-  const driversRes = await fetch(`${apiBase}/drivers`);
-  const drivers = await driversRes.json();
-  const driver = drivers.find((d: any) => String(d.id) === driverId);
+  try {
+    const checkRes = await driverFetch(`${apiBase}/driver-check`);
+    const checkData = await checkRes.json();
 
-  if (loginMessage && driver) {
-    loginMessage.innerHTML = `Logged in as ${driver.name} (${driver.status})`;
-  }
+    if (loginMessage && checkData.driver) {
+      loginMessage.innerHTML = `Logged in as ${checkData.driver.name} (${checkData.driver.status})`;
+    }
 
-  const res = await fetch(`${apiBase}/bookings`);
-  const bookings = await res.json();
+    const bookingsRes = await driverFetch(`${apiBase}/driver-bookings`);
+    const bookings = await bookingsRes.json();
 
-  const mine = bookings.filter((b: any) => String(b.driverId) === driverId);
-
-  if (list) {
-    list.innerHTML = mine.length
-      ? mine
-          .map(
-            (b: any) => `
-              <li style="margin-bottom:10px;">
-                ${b.from} → ${b.to} [${b.status}]
-              </li>
-            `
-          )
-          .join("")
-      : "<li>No bookings for this driver</li>";
+    if (list) {
+      list.innerHTML = bookings.length
+        ? bookings
+            .map(
+              (b: any) => `
+                <li style="margin-bottom:10px;">
+                  ${b.from} → ${b.to} [${b.status}]
+                  ${
+                    b.status !== "completed"
+                      ? `<button onclick="driverCompleteBooking('${b.id}')" style="margin-left:10px;">Complete</button>`
+                      : ""
+                  }
+                </li>
+              `
+            )
+            .join("")
+        : "<li>No bookings for this driver</li>";
+    }
+  } catch {
+    logoutDriver();
+    if (list) list.innerHTML = "";
+    if (loginMessage) loginMessage.innerHTML = "Driver session expired";
   }
 }
 
@@ -481,21 +517,74 @@ async function loadLoggedInDriverPanel() {
 
 (window as any).loginDriver = async function () {
   const id = (document.getElementById("driverLoginSelect") as HTMLSelectElement).value;
+  const password = (document.getElementById("driverPassword") as HTMLInputElement).value;
   const loginMessage = document.getElementById("loginMessage");
 
-  if (!id) {
-    if (loginMessage) loginMessage.innerHTML = "❌ Choose driver first";
+  if (!id || !password) {
+    if (loginMessage) loginMessage.innerHTML = "❌ Choose driver and enter password";
     return;
   }
 
-  setDriver(id);
-  await loadLoggedInDriverPanel();
+  try {
+    const res = await fetch(`${apiBase}/driver-login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        driverId: id,
+        password: password,
+      }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      setDriverToken(data.token);
+
+      if (loginMessage) {
+        loginMessage.innerHTML = `✅ Logged in as ${data.driver.name}`;
+      }
+
+      await loadLoggedInDriverPanel();
+    } else {
+      if (loginMessage) {
+        loginMessage.innerHTML = `❌ ${data.error || "Login failed"}`;
+      }
+    }
+  } catch {
+    if (loginMessage) {
+      loginMessage.innerHTML = "❌ Could not connect to backend";
+    }
+  }
 };
 
 (window as any).logoutDriverPanel = async function () {
   logoutDriver();
   await loadLoggedInDriverPanel();
   await loadDriverLoginOptions();
+};
+
+(window as any).driverCompleteBooking = async function (id: string) {
+  const loginMessage = document.getElementById("loginMessage");
+
+  try {
+    await driverFetch(`${apiBase}/driver-complete-booking/${id}`, {
+      method: "POST",
+    });
+
+    await loadLoggedInDriverPanel();
+    await loadCustomerBookings();
+    await loadCustomerDrivers();
+
+    if (loginMessage) {
+      loginMessage.innerHTML = "✅ Booking completed";
+    }
+  } catch {
+    if (loginMessage) {
+      loginMessage.innerHTML = "❌ Could not complete booking";
+    }
+  }
 };
 
 (window as any).loginAdmin = async function () {
@@ -559,7 +648,7 @@ async function loadLoggedInDriverPanel() {
   }
 };
 
-(window as any).completeBooking = async function (id: number) {
+(window as any).completeBooking = async function (id: string) {
   try {
     await adminFetch(`${apiBase}/complete-booking/${id}`, {
       method: "POST",
