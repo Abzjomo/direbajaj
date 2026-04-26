@@ -1,6 +1,6 @@
 import QRCode from "qrcode";
 
-const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3001";
+const apiBase = "https://direbajaj.onrender.com";
 const publicBookingUrl = `${window.location.origin}/?view=customer`;
 
 const root = document.getElementById("app") || document.getElementById("root");
@@ -12,7 +12,13 @@ function getView() {
 
 function setView(view: string) {
   const url = new URL(window.location.href);
-  url.searchParams.set("view", view);
+
+  if (view === "admin" && !isAdminLoggedIn()) {
+    url.searchParams.set("view", "admin-login");
+  } else {
+    url.searchParams.set("view", view);
+  }
+
   window.history.pushState({}, "", url.toString());
   load();
 }
@@ -29,7 +35,48 @@ function logoutDriver() {
   localStorage.removeItem("driverId");
 }
 
+function getAdminToken() {
+  return localStorage.getItem("adminToken") || "";
+}
+
+function setAdminToken(token: string) {
+  localStorage.setItem("adminToken", token);
+}
+
+function isAdminLoggedIn() {
+  return !!getAdminToken();
+}
+
+function logoutAdmin() {
+  localStorage.removeItem("adminToken");
+}
+
+async function adminFetch(url: string, options: RequestInit = {}) {
+  const token = getAdminToken();
+
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  const res = await fetch(url, {
+    ...options,
+    headers,
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    logoutAdmin();
+    setView("admin");
+    throw new Error("Admin session expired or unauthorized");
+  }
+
+  return res;
+}
+
 function navHtml(activeView: string) {
+  const actualActiveView = activeView === "admin-login" ? "admin" : activeView;
+
   const item = (view: string, label: string) => `
     <button
       onclick="changeView('${view}')"
@@ -38,8 +85,8 @@ function navHtml(activeView: string) {
         border:none;
         border-radius:10px;
         cursor:pointer;
-        background:${activeView === view ? "#111" : "#e9e9e9"};
-        color:${activeView === view ? "white" : "#111"};
+        background:${actualActiveView === view ? "#111" : "#e9e9e9"};
+        color:${actualActiveView === view ? "white" : "#111"};
         font-weight:600;
       "
     >
@@ -98,10 +145,22 @@ async function load() {
       root.innerHTML = layout(renderDriverView(), !!healthData.ok);
       await loadDriverLoginOptions();
       await loadLoggedInDriverPanel();
-    } else {
+    } else if (view === "admin-login") {
+      root.innerHTML = layout(renderAdminLoginView(), !!healthData.ok);
+    } else if (view === "admin") {
+      if (!isAdminLoggedIn()) {
+        root.innerHTML = layout(renderAdminLoginView(), !!healthData.ok);
+        return;
+      }
+
       root.innerHTML = layout(renderAdminView(), !!healthData.ok);
       await loadAdminBookings();
       await loadAdminDrivers();
+    } else {
+      root.innerHTML = layout(renderCustomerView(), !!healthData.ok);
+      await renderQrCode();
+      await loadCustomerDrivers();
+      await loadCustomerBookings();
     }
   } catch (error) {
     if (!root) return;
@@ -175,8 +234,51 @@ function renderDriverView() {
   `;
 }
 
+function renderAdminLoginView() {
+  return `
+    ${card(
+      "Admin Login",
+      `
+        <input
+          id="adminPassword"
+          type="password"
+          placeholder="Enter admin password"
+          style="width:100%; padding:12px; margin-bottom:10px;"
+        />
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button
+            onclick="loginAdmin()"
+            style="padding:10px 14px; background:black; color:white; border:none; border-radius:8px;"
+          >
+            Login
+          </button>
+
+          <button
+            onclick="changeView('customer')"
+            style="padding:10px 14px;"
+          >
+            Cancel
+          </button>
+        </div>
+
+        <p id="adminLoginMessage" style="margin-top:12px;"></p>
+      `
+    )}
+  `;
+}
+
 function renderAdminView() {
   return `
+    ${card(
+      "Admin Panel",
+      `
+        <div style="display:flex; justify-content:flex-end;">
+          <button onclick="logoutAdminPanel()" style="padding:10px 14px;">Logout admin</button>
+        </div>
+      `
+    )}
+
     ${card("All Bookings", `<ul id="adminBookings"></ul>`)}
 
     ${card(
@@ -237,42 +339,50 @@ async function loadCustomerBookings() {
 }
 
 async function loadAdminBookings() {
-  const res = await fetch(`${apiBase}/bookings`);
-  const bookings = await res.json();
-
   const list = document.getElementById("adminBookings");
   if (!list) return;
 
-  list.innerHTML = bookings.length
-    ? bookings
-        .map(
-          (b: any) => `
-            <li style="margin-bottom:10px;">
-              ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
-              ${
-                b.status !== "completed"
-                  ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
-                  : ""
-              }
-            </li>
-          `
-        )
-        .join("")
-    : "<li>No bookings yet</li>";
+  try {
+    const res = await fetch(`${apiBase}/bookings`);
+    const bookings = await res.json();
+
+    list.innerHTML = bookings.length
+      ? bookings
+          .map(
+            (b: any) => `
+              <li style="margin-bottom:10px;">
+                ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
+                ${
+                  b.status !== "completed"
+                    ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
+                    : ""
+                }
+              </li>
+            `
+          )
+          .join("")
+      : "<li>No bookings yet</li>";
+  } catch {
+    list.innerHTML = "<li>Could not load bookings</li>";
+  }
 }
 
 async function loadAdminDrivers() {
-  const res = await fetch(`${apiBase}/drivers`);
-  const drivers = await res.json();
-
   const list = document.getElementById("adminDrivers");
   if (!list) return;
 
-  list.innerHTML = drivers.length
-    ? drivers
-        .map((d: any) => `<li style="margin-bottom:8px;">${d.name} - ${d.area} (${d.status})</li>`)
-        .join("")
-    : "<li>No drivers found</li>";
+  try {
+    const res = await fetch(`${apiBase}/drivers`);
+    const drivers = await res.json();
+
+    list.innerHTML = drivers.length
+      ? drivers
+          .map((d: any) => `<li style="margin-bottom:8px;">${d.name} - ${d.area} (${d.status})</li>`)
+          .join("")
+      : "<li>No drivers found</li>";
+  } catch {
+    list.innerHTML = "<li>Could not load drivers</li>";
+  }
 }
 
 async function loadDriverLoginOptions() {
@@ -320,11 +430,6 @@ async function loadLoggedInDriverPanel() {
             (b: any) => `
               <li style="margin-bottom:10px;">
                 ${b.from} → ${b.to} [${b.status}]
-                ${
-                  b.status !== "completed"
-                    ? `<button onclick="completeBooking(${b.id})" style="margin-left:10px;">Complete</button>`
-                    : ""
-                }
               </li>
             `
           )
@@ -393,37 +498,86 @@ async function loadLoggedInDriverPanel() {
   await loadDriverLoginOptions();
 };
 
+(window as any).loginAdmin = async function () {
+  const password = (document.getElementById("adminPassword") as HTMLInputElement)?.value || "";
+  const msg = document.getElementById("adminLoginMessage");
+
+  try {
+    const res = await fetch(`${apiBase}/admin-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok && data.token) {
+      setAdminToken(data.token);
+      if (msg) msg.innerHTML = "✅ Login successful";
+      setView("admin");
+    } else {
+      if (msg) msg.innerHTML = `❌ ${data.error || "Login failed"}`;
+    }
+  } catch {
+    if (msg) msg.innerHTML = "❌ Could not connect to backend";
+  }
+};
+
+(window as any).logoutAdminPanel = function () {
+  logoutAdmin();
+  setView("customer");
+};
+
 (window as any).resetDrivers = async function () {
-  await fetch(`${apiBase}/reset-drivers`, { method: "POST" });
-
   const msg = document.getElementById("adminMessage");
-  if (msg) msg.innerHTML = "✅ Drivers reset";
 
-  if (getView() === "admin") {
-    await loadAdminDrivers();
-  }
-  if (getView() === "customer") {
-    await loadCustomerDrivers();
-  }
-  if (getView() === "driver") {
-    await loadDriverLoginOptions();
-    await loadLoggedInDriverPanel();
+  try {
+    const res = await adminFetch(`${apiBase}/reset-drivers`, {
+      method: "POST",
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      if (msg) msg.innerHTML = "✅ Drivers reset";
+    } else {
+      if (msg) msg.innerHTML = `❌ ${data.error || "Error"}`;
+    }
+
+    if (getView() === "admin") {
+      await loadAdminDrivers();
+    }
+    if (getView() === "customer") {
+      await loadCustomerDrivers();
+    }
+    if (getView() === "driver") {
+      await loadDriverLoginOptions();
+      await loadLoggedInDriverPanel();
+    }
+  } catch {
+    if (msg) msg.innerHTML = "❌ Admin authorization failed";
   }
 };
 
 (window as any).completeBooking = async function (id: number) {
-  await fetch(`${apiBase}/complete-booking/${id}`, { method: "POST" });
+  try {
+    await adminFetch(`${apiBase}/complete-booking/${id}`, {
+      method: "POST",
+    });
 
-  if (getView() === "admin") {
-    await loadAdminBookings();
-    await loadAdminDrivers();
-  }
-  if (getView() === "driver") {
-    await loadLoggedInDriverPanel();
-  }
-  if (getView() === "customer") {
-    await loadCustomerBookings();
-    await loadCustomerDrivers();
+    if (getView() === "admin") {
+      await loadAdminBookings();
+      await loadAdminDrivers();
+    }
+    if (getView() === "driver") {
+      await loadLoggedInDriverPanel();
+    }
+    if (getView() === "customer") {
+      await loadCustomerBookings();
+      await loadCustomerDrivers();
+    }
+  } catch {
+    alert("Admin authorization failed");
   }
 };
 
