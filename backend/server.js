@@ -1,6 +1,7 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const Database = require("better-sqlite3");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -8,135 +9,147 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-const db = new Database("direbajaj.db");
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const JWT_SECRET = process.env.JWT_SECRET;
 
-// CREATE TABLES
-db.exec(`
-  CREATE TABLE IF NOT EXISTS drivers (
-    id INTEGER PRIMARY KEY,
-    name TEXT,
-    area TEXT,
-    status TEXT
-  );
+let drivers = [
+  { id: 1, name: "Abdi", area: "Kezira", status: "available" },
+  { id: 2, name: "Hassan", area: "Megala", status: "available" },
+  { id: 3, name: "Musa", area: "Sabian", status: "available" },
+];
 
-  CREATE TABLE IF NOT EXISTS bookings (
-    id INTEGER PRIMARY KEY,
-    from_location TEXT,
-    to_location TEXT,
-    driver TEXT,
-    driver_id INTEGER,
-    status TEXT,
-    created_at TEXT
-  );
-`);
+let bookings = [];
+let bookingIdCounter = 1;
 
-// SEED DRIVERS
-const count = db.prepare("SELECT COUNT(*) as c FROM drivers").get();
-
-if (count.c === 0) {
-  db.prepare("INSERT INTO drivers VALUES (1,'Abdi','Kezira','available')").run();
-  db.prepare("INSERT INTO drivers VALUES (2,'Hassan','Megala','available')").run();
-  db.prepare("INSERT INTO drivers VALUES (3,'Musa','Sabian','available')").run();
+function createAdminToken() {
+  return jwt.sign({ role: "admin" }, JWT_SECRET, { expiresIn: "8h" });
 }
 
-// ROUTES
+function verifyAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
 
-app.get("/", (req, res) => {
-  res.send("DireBajaj backend running 🚀");
-});
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ ok: false, error: "Missing admin token" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.role !== "admin") {
+      return res.status(403).json({ ok: false, error: "Not authorized" });
+    }
+
+    req.admin = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ ok: false, error: "Invalid or expired token" });
+  }
+}
 
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+app.post("/admin-login", (req, res) => {
+  const { password } = req.body || {};
+
+  if (!password) {
+    return res.status(400).json({ ok: false, error: "Password is required" });
+  }
+
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ ok: false, error: "Wrong password" });
+  }
+
+  const token = createAdminToken();
+
+  res.json({
+    ok: true,
+    token,
+  });
+});
+
+app.get("/admin-check", verifyAdmin, (req, res) => {
+  res.json({ ok: true, admin: true });
+});
+
 app.get("/drivers", (req, res) => {
-  const drivers = db.prepare("SELECT * FROM drivers").all();
   res.json(drivers);
 });
 
-app.post("/reset-drivers", (req, res) => {
-  db.prepare("UPDATE drivers SET status='available'").run();
-  res.json({ ok: true });
-});
-
 app.get("/bookings", (req, res) => {
-  const bookings = db.prepare(`
-    SELECT 
-      id,
-      from_location AS "from",
-      to_location AS "to",
-      driver,
-      driver_id AS "driverId",
-      status,
-      created_at AS "createdAt"
-    FROM bookings
-    ORDER BY created_at DESC
-  `).all();
-
   res.json(bookings);
 });
 
 app.post("/book", (req, res) => {
-  const { from, to, driverId } = req.body;
+  const { from, to, driverId } = req.body || {};
 
   if (!from || !to) {
-    return res.status(400).json({ error: "Missing data" });
+    return res.status(400).json({ ok: false, error: "From and To are required" });
   }
 
-  let driver;
+  let selectedDriver = null;
 
   if (driverId) {
-    driver = db.prepare("SELECT * FROM drivers WHERE id=?").get(Number(driverId));
-    if (!driver || driver.status !== "available") {
-      return res.status(400).json({ error: "Driver not available" });
+    selectedDriver = drivers.find((d) => String(d.id) === String(driverId) && d.status === "available");
+    if (!selectedDriver) {
+      return res.status(400).json({ ok: false, error: "Selected driver not available" });
     }
   } else {
-    driver = db.prepare("SELECT * FROM drivers WHERE status='available' LIMIT 1").get();
-    if (!driver) {
-      return res.status(400).json({ error: "No drivers" });
+    selectedDriver = drivers.find((d) => d.status === "available");
+    if (!selectedDriver) {
+      return res.status(400).json({ ok: false, error: "No available drivers" });
     }
   }
 
-  db.prepare("UPDATE drivers SET status='busy' WHERE id=?").run(driver.id);
+  selectedDriver.status = "busy";
 
-  const id = Date.now();
-  const createdAt = new Date().toISOString();
+  const booking = {
+    id: bookingIdCounter++,
+    from,
+    to,
+    driverId: selectedDriver.id,
+    driver: selectedDriver.name,
+    status: "assigned",
+  };
 
-  db.prepare(`
-    INSERT INTO bookings VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, from, to, driver.name, driver.id, "assigned", createdAt);
+  bookings.unshift(booking);
 
-  const booking = db.prepare(`
-    SELECT 
-      id,
-      from_location AS "from",
-      to_location AS "to",
-      driver,
-      driver_id AS "driverId",
-      status,
-      created_at AS "createdAt"
-    FROM bookings WHERE id=?
-  `).get(id);
+  res.json({
+    ok: true,
+    booking,
+  });
+});
+
+app.post("/complete-booking/:id", verifyAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const booking = bookings.find((b) => b.id === id);
+
+  if (!booking) {
+    return res.status(404).json({ ok: false, error: "Booking not found" });
+  }
+
+  booking.status = "completed";
+
+  const driver = drivers.find((d) => d.id === booking.driverId);
+  if (driver) {
+    driver.status = "available";
+  }
 
   res.json({ ok: true, booking });
 });
 
-app.post("/complete-booking/:id", (req, res) => {
-  const id = Number(req.params.id);
+app.post("/reset-drivers", verifyAdmin, (req, res) => {
+  drivers = drivers.map((d) => ({
+    ...d,
+    status: "available",
+  }));
 
-  const booking = db.prepare("SELECT * FROM bookings WHERE id=?").get(id);
-
-  if (!booking) {
-    return res.status(404).json({ error: "Not found" });
-  }
-
-  db.prepare("UPDATE bookings SET status='completed' WHERE id=?").run(id);
-  db.prepare("UPDATE drivers SET status='available' WHERE id=?").run(booking.driver_id);
-
-  res.json({ ok: true });
+  res.json({ ok: true, drivers });
 });
 
-// IMPORTANT FOR RENDER
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port " + PORT);
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
