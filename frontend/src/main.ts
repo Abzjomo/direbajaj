@@ -51,6 +51,22 @@ function logoutDriver() {
   localStorage.removeItem("driverToken");
 }
 
+function getCustomerToken() {
+  return localStorage.getItem("customerToken") || "";
+}
+
+function setCustomerToken(token: string) {
+  localStorage.setItem("customerToken", token);
+}
+
+function isCustomerLoggedIn() {
+  return !!getCustomerToken();
+}
+
+function logoutCustomer() {
+  localStorage.removeItem("customerToken");
+}
+
 async function adminFetch(url: string, options: RequestInit = {}) {
   const token = getAdminToken();
 
@@ -91,6 +107,28 @@ async function driverFetch(url: string, options: RequestInit = {}) {
   if (res.status === 401 || res.status === 403) {
     logoutDriver();
     throw new Error("Driver session expired or unauthorized");
+  }
+
+  return res;
+}
+
+async function customerFetch(url: string, options: RequestInit = {}) {
+  const token = getCustomerToken();
+
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  const res = await fetch(url, {
+    ...options,
+    headers,
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    logoutCustomer();
+    throw new Error("Customer session expired or unauthorized");
   }
 
   return res;
@@ -149,6 +187,26 @@ function card(title: string, body: string) {
   `;
 }
 
+function passwordInputWithToggle(inputId: string, placeholder: string) {
+  return `
+    <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center;">
+      <input
+        id="${inputId}"
+        type="password"
+        placeholder="${placeholder}"
+        style="width:100%; padding:12px;"
+      />
+      <button
+        type="button"
+        onclick="togglePassword('${inputId}', this)"
+        style="padding:10px 12px; min-width:70px;"
+      >
+        Show
+      </button>
+    </div>
+  `;
+}
+
 async function load() {
   if (!root) return;
 
@@ -163,6 +221,7 @@ async function load() {
       await renderQrCode();
       await loadCustomerDrivers();
       await loadCustomerBookings();
+      await loadCustomerAccount();
     } else if (view === "driver") {
       root.innerHTML = layout(renderDriverView(), !!healthData.ok);
       await loadDriverLoginOptions();
@@ -183,6 +242,7 @@ async function load() {
       await renderQrCode();
       await loadCustomerDrivers();
       await loadCustomerBookings();
+      await loadCustomerAccount();
     }
   } catch {
     if (!root) return;
@@ -197,6 +257,13 @@ async function load() {
 
 function renderCustomerView() {
   return `
+    ${card(
+      "Customer Account",
+      `
+        <div id="customerAccountBox"></div>
+      `
+    )}
+
     ${card(
       "Public Booking QR",
       `
@@ -243,12 +310,7 @@ function renderDriverView() {
           <option value="">Choose driver</option>
         </select>
 
-        <input
-          id="driverPassword"
-          type="password"
-          placeholder="Driver password"
-          style="width:100%; padding:12px; margin-bottom:10px;"
-        />
+        ${passwordInputWithToggle("driverPassword", "Driver password")}
 
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <button onclick="loginDriver()" style="padding:10px 14px;">Login</button>
@@ -264,26 +326,9 @@ function renderDriverView() {
     ${card(
       "Change Password",
       `
-        <input
-          id="currentDriverPassword"
-          type="password"
-          placeholder="Current password"
-          style="width:100%; padding:12px; margin-bottom:10px;"
-        />
-
-        <input
-          id="newDriverPassword"
-          type="password"
-          placeholder="New password"
-          style="width:100%; padding:12px; margin-bottom:10px;"
-        />
-
-        <input
-          id="confirmDriverPassword"
-          type="password"
-          placeholder="Confirm new password"
-          style="width:100%; padding:12px; margin-bottom:10px;"
-        />
+        ${passwordInputWithToggle("currentDriverPassword", "Current password")}
+        ${passwordInputWithToggle("newDriverPassword", "New password")}
+        ${passwordInputWithToggle("confirmDriverPassword", "Confirm new password")}
 
         <button onclick="changeDriverPassword()" style="padding:10px 14px;">
           Update password
@@ -363,6 +408,75 @@ async function renderQrCode() {
   });
 }
 
+async function loadCustomerAccount() {
+  const box = document.getElementById("customerAccountBox");
+  if (!box) return;
+
+  const token = getCustomerToken();
+
+  if (!token) {
+    box.innerHTML = `
+      <div style="margin-bottom:20px;">
+        <h4 style="margin-bottom:10px;">Register</h4>
+        <input id="customerRegisterName" placeholder="Name" style="width:100%; padding:12px; margin-bottom:10px;" />
+        <input id="customerRegisterPhone" placeholder="Phone" style="width:100%; padding:12px; margin-bottom:10px;" />
+        ${passwordInputWithToggle("customerRegisterPassword", "Password")}
+        <button onclick="registerCustomer()" style="padding:10px 14px;">Register</button>
+        <p id="customerRegisterMessage" style="margin-top:10px;"></p>
+      </div>
+
+      <div>
+        <h4 style="margin-bottom:10px;">Login</h4>
+        <input id="customerLoginPhone" placeholder="Phone" style="width:100%; padding:12px; margin-bottom:10px;" />
+        ${passwordInputWithToggle("customerLoginPassword", "Password")}
+        <button onclick="loginCustomer()" style="padding:10px 14px;">Login</button>
+        <p id="customerLoginMessage" style="margin-top:10px;"></p>
+      </div>
+    `;
+    return;
+  }
+
+  try {
+    const res = await customerFetch(`${apiBase}/customer-check`);
+    const data = await res.json();
+
+    const bookingsRes = await customerFetch(`${apiBase}/customer-bookings`);
+    const bookings = await bookingsRes.json();
+
+    box.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+        <div>
+          <strong>Logged in as:</strong> ${data.customer.name}<br />
+          <span>${data.customer.phone}</span>
+        </div>
+        <button onclick="logoutCustomerPanel()" style="padding:10px 14px;">Logout</button>
+      </div>
+
+      <div style="margin-top:20px;">
+        <h4 style="margin-bottom:10px;">My Bookings</h4>
+        <ul>
+          ${
+            bookings.length
+              ? bookings
+                  .map(
+                    (b: any) => `
+                    <li style="margin-bottom:10px;">
+                      ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
+                    </li>
+                  `
+                  )
+                  .join("")
+              : "<li>No customer bookings yet</li>"
+          }
+        </ul>
+      </div>
+    `;
+  } catch {
+    logoutCustomer();
+    box.innerHTML = `<p style="color:red;">Customer session expired</p>`;
+  }
+}
+
 async function loadCustomerDrivers() {
   const res = await fetch(`${apiBase}/drivers`);
   const drivers = await res.json();
@@ -392,6 +506,7 @@ async function loadCustomerBookings() {
           (b: any) => `
             <li style="margin-bottom:10px;">
               ${b.from} → ${b.to} (${b.driver || "none"}) [${b.status}]
+              ${b.customerName ? ` - Customer: ${b.customerName}` : ""}
             </li>
           `
         )
@@ -413,6 +528,7 @@ async function loadAdminBookings() {
             (b: any) => `
               <li style="margin-bottom:10px;">
                 ${b.from} → ${b.to} (Driver: ${b.driver || "none"}) [${b.status}]
+                ${b.customerName ? `<br /><small>Customer: ${b.customerName} (${b.customerPhone || ""})</small>` : ""}
                 ${
                   b.status !== "completed"
                     ? `<button onclick="completeBooking('${b.id}')" style="margin-left:10px;">Complete</button>`
@@ -488,6 +604,7 @@ async function loadLoggedInDriverPanel() {
               (b: any) => `
                 <li style="margin-bottom:10px;">
                   ${b.from} → ${b.to} [${b.status}]
+                  ${b.customerName ? `<br /><small>Customer: ${b.customerName} (${b.customerPhone || ""})</small>` : ""}
                   ${
                     b.status !== "completed"
                       ? `<button onclick="driverCompleteBooking('${b.id}')" style="margin-left:10px;">Complete</button>`
@@ -510,6 +627,19 @@ async function loadLoggedInDriverPanel() {
   setView(view);
 };
 
+(window as any).togglePassword = function (inputId: string, button: HTMLButtonElement) {
+  const input = document.getElementById(inputId) as HTMLInputElement | null;
+  if (!input) return;
+
+  if (input.type === "password") {
+    input.type = "text";
+    button.textContent = "Hide";
+  } else {
+    input.type = "password";
+    button.textContent = "Show";
+  }
+};
+
 (window as any).copyBookingLink = async function () {
   const msg = document.getElementById("copyMessage");
   try {
@@ -520,6 +650,64 @@ async function loadLoggedInDriverPanel() {
   }
 };
 
+(window as any).registerCustomer = async function () {
+  const name = (document.getElementById("customerRegisterName") as HTMLInputElement)?.value || "";
+  const phone = (document.getElementById("customerRegisterPhone") as HTMLInputElement)?.value || "";
+  const password = (document.getElementById("customerRegisterPassword") as HTMLInputElement)?.value || "";
+  const msg = document.getElementById("customerRegisterMessage");
+
+  try {
+    const res = await fetch(`${apiBase}/customer-register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, phone, password }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok && data.token) {
+      setCustomerToken(data.token);
+      if (msg) msg.innerHTML = "✅ Customer registered";
+      await loadCustomerAccount();
+    } else {
+      if (msg) msg.innerHTML = `❌ ${data.error || "Register failed"}`;
+    }
+  } catch {
+    if (msg) msg.innerHTML = "❌ Could not register customer";
+  }
+};
+
+(window as any).loginCustomer = async function () {
+  const phone = (document.getElementById("customerLoginPhone") as HTMLInputElement)?.value || "";
+  const password = (document.getElementById("customerLoginPassword") as HTMLInputElement)?.value || "";
+  const msg = document.getElementById("customerLoginMessage");
+
+  try {
+    const res = await fetch(`${apiBase}/customer-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, password }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok && data.token) {
+      setCustomerToken(data.token);
+      if (msg) msg.innerHTML = "✅ Customer login successful";
+      await loadCustomerAccount();
+    } else {
+      if (msg) msg.innerHTML = `❌ ${data.error || "Login failed"}`;
+    }
+  } catch {
+    if (msg) msg.innerHTML = "❌ Could not log in customer";
+  }
+};
+
+(window as any).logoutCustomerPanel = async function () {
+  logoutCustomer();
+  await loadCustomerAccount();
+};
+
 (window as any).bookRide = async function () {
   const from = (document.getElementById("from") as HTMLInputElement).value;
   const to = (document.getElementById("to") as HTMLInputElement).value;
@@ -527,18 +715,33 @@ async function loadLoggedInDriverPanel() {
   const message = document.getElementById("message");
 
   try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    const customerToken = getCustomerToken();
+    if (customerToken) {
+      headers.Authorization = `Bearer ${customerToken}`;
+    }
+
     const res = await fetch(`${apiBase}/book`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ from, to, driverId }),
     });
 
     const data = await res.json();
 
     if (data.ok) {
-      if (message) message.innerHTML = `✅ Booking saved (Driver: ${data.booking.driver})`;
+      if (message) {
+        message.innerHTML = data.booking.customerName
+          ? `✅ Booking saved for ${data.booking.customerName} (Driver: ${data.booking.driver})`
+          : `✅ Booking saved (Driver: ${data.booking.driver})`;
+      }
+
       await loadCustomerBookings();
       await loadCustomerDrivers();
+      await loadCustomerAccount();
     } else {
       if (message) message.innerHTML = `❌ ${data.error || "Error"}`;
     }
@@ -608,6 +811,7 @@ async function loadLoggedInDriverPanel() {
     await loadLoggedInDriverPanel();
     await loadCustomerBookings();
     await loadCustomerDrivers();
+    await loadCustomerAccount();
 
     if (loginMessage) {
       loginMessage.innerHTML = "✅ Booking completed";
@@ -720,6 +924,7 @@ async function loadLoggedInDriverPanel() {
     }
     if (getView() === "customer") {
       await loadCustomerDrivers();
+      await loadCustomerAccount();
     }
     if (getView() === "driver") {
       await loadDriverLoginOptions();
@@ -746,6 +951,7 @@ async function loadLoggedInDriverPanel() {
     if (getView() === "customer") {
       await loadCustomerBookings();
       await loadCustomerDrivers();
+      await loadCustomerAccount();
     }
   } catch {
     alert("Admin authorization failed");
