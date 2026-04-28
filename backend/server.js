@@ -146,7 +146,7 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-/* ADMIN LOGIN */
+/* ADMIN */
 app.post("/admin-login", (req, res) => {
   const { password } = req.body || {};
 
@@ -158,10 +158,17 @@ app.post("/admin-login", (req, res) => {
     return res.status(401).json({ ok: false, error: "Wrong password" });
   }
 
-  res.json({ ok: true, token: createAdminToken() });
+  res.json({
+    ok: true,
+    token: createAdminToken(),
+  });
 });
 
-/* DRIVER LOGIN */
+app.get("/admin-check", verifyAdmin, (req, res) => {
+  res.json({ ok: true, admin: true });
+});
+
+/* DRIVER */
 app.post("/driver-login", async (req, res) => {
   try {
     const { driverId, password } = req.body || {};
@@ -171,12 +178,14 @@ app.post("/driver-login", async (req, res) => {
     }
 
     const driver = await Driver.findById(driverId);
+
     if (!driver) {
       return res.status(404).json({ ok: false, error: "Driver not found" });
     }
 
-    const ok = await bcrypt.compare(password, driver.passwordHash);
-    if (!ok) {
+    const passwordOk = await bcrypt.compare(password, driver.passwordHash);
+
+    if (!passwordOk) {
       return res.status(401).json({ ok: false, error: "Wrong driver password" });
     }
 
@@ -191,11 +200,32 @@ app.post("/driver-login", async (req, res) => {
       },
     });
   } catch {
-    res.status(500).json({ ok: false, error: "Login failed" });
+    res.status(500).json({ ok: false, error: "Could not log in driver" });
   }
 });
 
-/* CHANGE DRIVER PASSWORD */
+app.get("/driver-check", verifyDriver, async (req, res) => {
+  try {
+    const driver = await Driver.findById(req.driver.driverId);
+
+    if (!driver) {
+      return res.status(404).json({ ok: false, error: "Driver not found" });
+    }
+
+    res.json({
+      ok: true,
+      driver: {
+        id: driver._id,
+        name: driver.name,
+        area: driver.area,
+        status: driver.status,
+      },
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not verify driver" });
+  }
+});
+
 app.post("/driver-change-password", verifyDriver, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
@@ -210,7 +240,12 @@ app.post("/driver-change-password", verifyDriver, async (req, res) => {
 
     const driver = await Driver.findById(req.driver.driverId);
 
+    if (!driver) {
+      return res.status(404).json({ ok: false, error: "Driver not found" });
+    }
+
     const ok = await bcrypt.compare(currentPassword, driver.passwordHash);
+
     if (!ok) {
       return res.status(401).json({ ok: false, error: "Wrong current password" });
     }
@@ -224,93 +259,185 @@ app.post("/driver-change-password", verifyDriver, async (req, res) => {
   }
 });
 
+app.get("/driver-bookings", verifyDriver, async (req, res) => {
+  try {
+    const bookings = await Booking.find({ driverId: req.driver.driverId }).sort({ createdAt: -1 });
+
+    res.json(
+      bookings.map((b) => ({
+        id: b._id,
+        from: b.from,
+        to: b.to,
+        driverId: b.driverId,
+        driver: b.driver,
+        status: b.status,
+      }))
+    );
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not load driver bookings" });
+  }
+});
+
+app.post("/driver-complete-booking/:id", verifyDriver, async (req, res) => {
+  try {
+    const booking = await Booking.findOne({
+      _id: req.params.id,
+      driverId: req.driver.driverId,
+    });
+
+    if (!booking) {
+      return res.status(404).json({ ok: false, error: "Booking not found" });
+    }
+
+    booking.status = "completed";
+    await booking.save();
+
+    const driver = await Driver.findById(req.driver.driverId);
+    if (driver) {
+      driver.status = "available";
+      await driver.save();
+    }
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not complete booking" });
+  }
+});
+
 /* DATA */
 app.get("/drivers", async (req, res) => {
-  const drivers = await Driver.find();
-  res.json(drivers.map(d => ({
-    id: d._id,
-    name: d.name,
-    area: d.area,
-    status: d.status
-  })));
+  try {
+    const drivers = await Driver.find().sort({ createdAt: 1 });
+
+    res.json(
+      drivers.map((d) => ({
+        id: d._id,
+        name: d.name,
+        area: d.area,
+        status: d.status,
+      }))
+    );
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not load drivers" });
+  }
 });
 
 app.get("/bookings", async (req, res) => {
-  const bookings = await Booking.find().sort({ createdAt: -1 });
-  res.json(bookings.map(b => ({
-    id: b._id,
-    from: b.from,
-    to: b.to,
-    driverId: b.driverId,
-    driver: b.driver,
-    status: b.status
-  })));
+  try {
+    const bookings = await Booking.find().sort({ createdAt: -1 });
+
+    res.json(
+      bookings.map((b) => ({
+        id: b._id,
+        from: b.from,
+        to: b.to,
+        driverId: b.driverId,
+        driver: b.driver,
+        status: b.status,
+      }))
+    );
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not load bookings" });
+  }
 });
 
-/* CREATE BOOKING */
+/* BOOKING */
 app.post("/book", async (req, res) => {
-  const { from, to, driverId } = req.body;
+  try {
+    const { from, to, driverId } = req.body || {};
 
-  if (!from || !to) {
-    return res.status(400).json({ ok: false });
+    if (!from || !to) {
+      return res.status(400).json({ ok: false, error: "From and To are required" });
+    }
+
+    let selectedDriver = null;
+
+    if (driverId) {
+      selectedDriver = await Driver.findOne({
+        _id: driverId,
+        status: "available",
+      });
+
+      if (!selectedDriver) {
+        return res.status(400).json({ ok: false, error: "Selected driver not available" });
+      }
+    } else {
+      selectedDriver = await Driver.findOne({ status: "available" }).sort({ createdAt: 1 });
+
+      if (!selectedDriver) {
+        return res.status(400).json({ ok: false, error: "No available drivers" });
+      }
+    }
+
+    selectedDriver.status = "busy";
+    await selectedDriver.save();
+
+    const booking = await Booking.create({
+      from,
+      to,
+      driverId: selectedDriver._id,
+      driver: selectedDriver.name,
+      status: "assigned",
+    });
+
+    res.json({
+      ok: true,
+      booking: {
+        id: booking._id,
+        from: booking.from,
+        to: booking.to,
+        driverId: booking.driverId,
+        driver: booking.driver,
+        status: booking.status,
+      },
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not create booking" });
   }
-
-  let driver = null;
-
-  if (driverId) {
-    driver = await Driver.findOne({ _id: driverId, status: "available" });
-  } else {
-    driver = await Driver.findOne({ status: "available" });
-  }
-
-  if (!driver) {
-    return res.status(400).json({ ok: false });
-  }
-
-  driver.status = "busy";
-  await driver.save();
-
-  const booking = await Booking.create({
-    from,
-    to,
-    driverId: driver._id,
-    driver: driver.name
-  });
-
-  res.json({ ok: true, booking });
 });
 
-/* COMPLETE */
-app.post("/driver-complete-booking/:id", verifyDriver, async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
-
-  booking.status = "completed";
-  await booking.save();
-
-  const driver = await Driver.findById(req.driver.driverId);
-  driver.status = "available";
-  await driver.save();
-
-  res.json({ ok: true });
-});
-
+/* ADMIN ACTIONS */
 app.post("/complete-booking/:id", verifyAdmin, async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
+  try {
+    const booking = await Booking.findById(req.params.id);
 
-  booking.status = "completed";
-  await booking.save();
+    if (!booking) {
+      return res.status(404).json({ ok: false, error: "Booking not found" });
+    }
 
-  const driver = await Driver.findById(booking.driverId);
-  driver.status = "available";
-  await driver.save();
+    booking.status = "completed";
+    await booking.save();
 
-  res.json({ ok: true });
+    const driver = await Driver.findById(booking.driverId);
+    if (driver) {
+      driver.status = "available";
+      await driver.save();
+    }
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not complete booking" });
+  }
 });
 
-/* RESET */
 app.post("/reset-drivers", verifyAdmin, async (req, res) => {
-  await Driver.updateMany({}, { status: "available" });
-  res.json({ ok: true });
+  try {
+    await Driver.updateMany({}, { $set: { status: "available" } });
+
+    const drivers = await Driver.find().sort({ createdAt: 1 });
+
+    res.json({
+      ok: true,
+      drivers: drivers.map((d) => ({
+        id: d._id,
+        name: d.name,
+        area: d.area,
+        status: d.status,
+      })),
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not reset drivers" });
+  }
 });
 
 /* =========================
@@ -318,14 +445,19 @@ app.post("/reset-drivers", verifyAdmin, async (req, res) => {
 ========================= */
 
 async function start() {
-  await mongoose.connect(MONGODB_URI);
-  console.log("Connected to MongoDB");
+  try {
+    await mongoose.connect(MONGODB_URI);
+    console.log("Connected to MongoDB");
 
-  await seedDriversIfEmpty();
+    await seedDriversIfEmpty();
 
-  app.listen(PORT, () => {
-    console.log("Server running on port " + PORT);
-  });
+    app.listen(PORT, () => {
+      console.log("Server running on port " + PORT);
+    });
+  } catch (error) {
+    console.error("MongoDB connection failed:", error.message);
+    process.exit(1);
+  }
 }
 
 start();
