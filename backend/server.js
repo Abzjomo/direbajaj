@@ -20,6 +20,10 @@ if (!ADMIN_PASSWORD || !JWT_SECRET || !MONGODB_URI) {
   process.exit(1);
 }
 
+/* =========================
+   SCHEMAS
+========================= */
+
 const driverSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, unique: true },
@@ -44,6 +48,10 @@ const bookingSchema = new mongoose.Schema(
 const Driver = mongoose.model("Driver", driverSchema);
 const Booking = mongoose.model("Booking", bookingSchema);
 
+/* =========================
+   TOKENS
+========================= */
+
 function createAdminToken() {
   return jwt.sign({ role: "admin" }, JWT_SECRET, { expiresIn: "8h" });
 }
@@ -59,6 +67,10 @@ function createDriverToken(driver) {
     { expiresIn: "8h" }
   );
 }
+
+/* =========================
+   MIDDLEWARE
+========================= */
 
 function verifyAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -78,7 +90,7 @@ function verifyAdmin(req, res, next) {
 
     req.admin = decoded;
     next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ ok: false, error: "Invalid or expired token" });
   }
 }
@@ -101,10 +113,14 @@ function verifyDriver(req, res, next) {
 
     req.driver = decoded;
     next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ ok: false, error: "Invalid or expired token" });
   }
 }
+
+/* =========================
+   SEED
+========================= */
 
 async function seedDriversIfEmpty() {
   const count = await Driver.countDocuments();
@@ -118,14 +134,19 @@ async function seedDriversIfEmpty() {
       { name: "Musa", area: "Sabian", status: "available", passwordHash: defaultPassword },
     ]);
 
-    console.log("Default drivers seeded. Default password: 123456");
+    console.log("Default drivers seeded (password: 123456)");
   }
 }
+
+/* =========================
+   ROUTES
+========================= */
 
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+/* ADMIN LOGIN */
 app.post("/admin-login", (req, res) => {
   const { password } = req.body || {};
 
@@ -137,39 +158,31 @@ app.post("/admin-login", (req, res) => {
     return res.status(401).json({ ok: false, error: "Wrong password" });
   }
 
-  const token = createAdminToken();
-
-  res.json({
-    ok: true,
-    token,
-  });
+  res.json({ ok: true, token: createAdminToken() });
 });
 
+/* DRIVER LOGIN */
 app.post("/driver-login", async (req, res) => {
   try {
     const { driverId, password } = req.body || {};
 
     if (!driverId || !password) {
-      return res.status(400).json({ ok: false, error: "Driver and password are required" });
+      return res.status(400).json({ ok: false, error: "Driver and password required" });
     }
 
     const driver = await Driver.findById(driverId);
-
     if (!driver) {
       return res.status(404).json({ ok: false, error: "Driver not found" });
     }
 
-    const passwordOk = await bcrypt.compare(password, driver.passwordHash);
-
-    if (!passwordOk) {
+    const ok = await bcrypt.compare(password, driver.passwordHash);
+    if (!ok) {
       return res.status(401).json({ ok: false, error: "Wrong driver password" });
     }
 
-    const token = createDriverToken(driver);
-
     res.json({
       ok: true,
-      token,
+      token: createDriverToken(driver),
       driver: {
         id: driver._id,
         name: driver.name,
@@ -177,246 +190,142 @@ app.post("/driver-login", async (req, res) => {
         status: driver.status,
       },
     });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not log in driver" });
+  } catch {
+    res.status(500).json({ ok: false, error: "Login failed" });
   }
 });
 
-app.get("/admin-check", verifyAdmin, (req, res) => {
-  res.json({ ok: true, admin: true });
-});
-
-app.get("/driver-check", verifyDriver, async (req, res) => {
+/* CHANGE DRIVER PASSWORD */
+app.post("/driver-change-password", verifyDriver, async (req, res) => {
   try {
-    const driver = await Driver.findById(req.driver.driverId);
+    const { currentPassword, newPassword } = req.body || {};
 
-    if (!driver) {
-      return res.status(404).json({ ok: false, error: "Driver not found" });
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ ok: false, error: "Both passwords required" });
     }
 
-    res.json({
-      ok: true,
-      driver: {
-        id: driver._id,
-        name: driver.name,
-        area: driver.area,
-        status: driver.status,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not verify driver" });
+    if (newPassword.length < 6) {
+      return res.status(400).json({ ok: false, error: "Min 6 characters" });
+    }
+
+    const driver = await Driver.findById(req.driver.driverId);
+
+    const ok = await bcrypt.compare(currentPassword, driver.passwordHash);
+    if (!ok) {
+      return res.status(401).json({ ok: false, error: "Wrong current password" });
+    }
+
+    driver.passwordHash = await bcrypt.hash(newPassword, 10);
+    await driver.save();
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not update password" });
   }
 });
 
+/* DATA */
 app.get("/drivers", async (req, res) => {
-  try {
-    const drivers = await Driver.find().sort({ createdAt: 1 });
-    res.json(
-      drivers.map((d) => ({
-        id: d._id,
-        name: d.name,
-        area: d.area,
-        status: d.status,
-      }))
-    );
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not load drivers" });
-  }
+  const drivers = await Driver.find();
+  res.json(drivers.map(d => ({
+    id: d._id,
+    name: d.name,
+    area: d.area,
+    status: d.status
+  })));
 });
 
 app.get("/bookings", async (req, res) => {
-  try {
-    const bookings = await Booking.find().sort({ createdAt: -1 });
-    res.json(
-      bookings.map((b) => ({
-        id: b._id,
-        from: b.from,
-        to: b.to,
-        driverId: b.driverId,
-        driver: b.driver,
-        status: b.status,
-      }))
-    );
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not load bookings" });
-  }
+  const bookings = await Booking.find().sort({ createdAt: -1 });
+  res.json(bookings.map(b => ({
+    id: b._id,
+    from: b.from,
+    to: b.to,
+    driverId: b.driverId,
+    driver: b.driver,
+    status: b.status
+  })));
 });
 
-app.get("/driver-bookings", verifyDriver, async (req, res) => {
-  try {
-    const bookings = await Booking.find({ driverId: req.driver.driverId }).sort({ createdAt: -1 });
-
-    res.json(
-      bookings.map((b) => ({
-        id: b._id,
-        from: b.from,
-        to: b.to,
-        driverId: b.driverId,
-        driver: b.driver,
-        status: b.status,
-      }))
-    );
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not load driver bookings" });
-  }
-});
-
+/* CREATE BOOKING */
 app.post("/book", async (req, res) => {
-  try {
-    const { from, to, driverId } = req.body || {};
+  const { from, to, driverId } = req.body;
 
-    if (!from || !to) {
-      return res.status(400).json({ ok: false, error: "From and To are required" });
-    }
-
-    let selectedDriver = null;
-
-    if (driverId) {
-      selectedDriver = await Driver.findOne({
-        _id: driverId,
-        status: "available",
-      });
-
-      if (!selectedDriver) {
-        return res.status(400).json({ ok: false, error: "Selected driver not available" });
-      }
-    } else {
-      selectedDriver = await Driver.findOne({ status: "available" }).sort({ createdAt: 1 });
-
-      if (!selectedDriver) {
-        return res.status(400).json({ ok: false, error: "No available drivers" });
-      }
-    }
-
-    selectedDriver.status = "busy";
-    await selectedDriver.save();
-
-    const booking = await Booking.create({
-      from,
-      to,
-      driverId: selectedDriver._id,
-      driver: selectedDriver.name,
-      status: "assigned",
-    });
-
-    res.json({
-      ok: true,
-      booking: {
-        id: booking._id,
-        from: booking.from,
-        to: booking.to,
-        driverId: booking.driverId,
-        driver: booking.driver,
-        status: booking.status,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not create booking" });
+  if (!from || !to) {
+    return res.status(400).json({ ok: false });
   }
+
+  let driver = null;
+
+  if (driverId) {
+    driver = await Driver.findOne({ _id: driverId, status: "available" });
+  } else {
+    driver = await Driver.findOne({ status: "available" });
+  }
+
+  if (!driver) {
+    return res.status(400).json({ ok: false });
+  }
+
+  driver.status = "busy";
+  await driver.save();
+
+  const booking = await Booking.create({
+    from,
+    to,
+    driverId: driver._id,
+    driver: driver.name
+  });
+
+  res.json({ ok: true, booking });
 });
 
+/* COMPLETE */
 app.post("/driver-complete-booking/:id", verifyDriver, async (req, res) => {
-  try {
-    const booking = await Booking.findOne({
-      _id: req.params.id,
-      driverId: req.driver.driverId,
-    });
+  const booking = await Booking.findById(req.params.id);
 
-    if (!booking) {
-      return res.status(404).json({ ok: false, error: "Booking not found" });
-    }
+  booking.status = "completed";
+  await booking.save();
 
-    booking.status = "completed";
-    await booking.save();
+  const driver = await Driver.findById(req.driver.driverId);
+  driver.status = "available";
+  await driver.save();
 
-    const driver = await Driver.findById(req.driver.driverId);
-    if (driver) {
-      driver.status = "available";
-      await driver.save();
-    }
-
-    res.json({
-      ok: true,
-      booking: {
-        id: booking._id,
-        from: booking.from,
-        to: booking.to,
-        driverId: booking.driverId,
-        driver: booking.driver,
-        status: booking.status,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not complete driver booking" });
-  }
+  res.json({ ok: true });
 });
 
 app.post("/complete-booking/:id", verifyAdmin, async (req, res) => {
-  try {
-    const booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findById(req.params.id);
 
-    if (!booking) {
-      return res.status(404).json({ ok: false, error: "Booking not found" });
-    }
+  booking.status = "completed";
+  await booking.save();
 
-    booking.status = "completed";
-    await booking.save();
+  const driver = await Driver.findById(booking.driverId);
+  driver.status = "available";
+  await driver.save();
 
-    const driver = await Driver.findById(booking.driverId);
-    if (driver) {
-      driver.status = "available";
-      await driver.save();
-    }
-
-    res.json({
-      ok: true,
-      booking: {
-        id: booking._id,
-        from: booking.from,
-        to: booking.to,
-        driverId: booking.driverId,
-        driver: booking.driver,
-        status: booking.status,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not complete booking" });
-  }
+  res.json({ ok: true });
 });
 
+/* RESET */
 app.post("/reset-drivers", verifyAdmin, async (req, res) => {
-  try {
-    await Driver.updateMany({}, { $set: { status: "available" } });
-    const drivers = await Driver.find().sort({ createdAt: 1 });
-
-    res.json({
-      ok: true,
-      drivers: drivers.map((d) => ({
-        id: d._id,
-        name: d.name,
-        area: d.area,
-        status: d.status,
-      })),
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Could not reset drivers" });
-  }
+  await Driver.updateMany({}, { status: "available" });
+  res.json({ ok: true });
 });
 
-async function startServer() {
-  try {
-    await mongoose.connect(MONGODB_URI);
-    console.log("Connected to MongoDB");
+/* =========================
+   START
+========================= */
 
-    await seedDriversIfEmpty();
+async function start() {
+  await mongoose.connect(MONGODB_URI);
+  console.log("Connected to MongoDB");
 
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error("MongoDB connection failed:", error.message);
-    process.exit(1);
-  }
+  await seedDriversIfEmpty();
+
+  app.listen(PORT, () => {
+    console.log("Server running on port " + PORT);
+  });
 }
 
-startServer();
+start();
