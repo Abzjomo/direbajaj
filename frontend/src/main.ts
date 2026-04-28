@@ -184,7 +184,7 @@ async function load() {
       await loadCustomerDrivers();
       await loadCustomerBookings();
     }
-  } catch (error) {
+  } catch {
     if (!root) return;
     root.innerHTML = `
       <div style="font-family: Arial; padding: 40px;">
@@ -260,6 +260,31 @@ function renderDriverView() {
     )}
 
     ${card("Your Bookings", `<ul id="driverBookings"></ul>`)}
+
+    ${card(
+      "Change Password",
+      `
+        <input
+          id="currentDriverPassword"
+          type="password"
+          placeholder="Current password"
+          style="width:100%; padding:12px; margin-bottom:10px;"
+        />
+
+        <input
+          id="newDriverPassword"
+          type="password"
+          placeholder="New password"
+          style="width:100%; padding:12px; margin-bottom:10px;"
+        />
+
+        <button onclick="changeDriverPassword()" style="padding:10px 14px;">
+          Update password
+        </button>
+
+        <p id="driverPasswordMessage" style="margin-top:12px;"></p>
+      `
+    )}
   `;
 }
 
@@ -584,6 +609,43 @@ async function loadLoggedInDriverPanel() {
     if (loginMessage) {
       loginMessage.innerHTML = "❌ Could not complete booking";
     }
+  }
+};
+
+(window as any).changeDriverPassword = async function () {
+  const currentPassword = (document.getElementById("currentDriverPassword") as HTMLInputElement).value;
+  const newPassword = (document.getElementById("newDriverPassword") as HTMLInputElement).value;
+  const msg = document.getElementById("driverPasswordMessage");
+
+  if (!currentPassword || !newPassword) {
+    if (msg) msg.innerHTML = "❌ Enter both passwords";
+    return;
+  }
+
+  try {
+    const res = await driverFetch(`${apiBase}/driver-change-password`, {
+      method: "POST",
+      body: JSON.stringify({
+        currentPassword,
+        newPassword,
+      }),
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      if (msg) msg.innerHTML = "✅ Password updated";
+
+      const currentInput = document.getElementById("currentDriverPassword") as HTMLInputElement;
+      const newInput = document.getElementById("newDriverPassword") as HTMLInputElement;
+
+      if (currentInput) currentInput.value = "";
+      if (newInput) newInput.value = "";
+    } else {
+      if (msg) msg.innerHTML = `❌ ${data.error || "Could not update password"}`;
+    }
+  } catch {
+    if (msg) msg.innerHTML = "❌ Could not update password";
   }
 };
 
