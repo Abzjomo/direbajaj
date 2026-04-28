@@ -278,6 +278,13 @@ function renderDriverView() {
           style="width:100%; padding:12px; margin-bottom:10px;"
         />
 
+        <input
+          id="confirmDriverPassword"
+          type="password"
+          placeholder="Confirm new password"
+          style="width:100%; padding:12px; margin-bottom:10px;"
+        />
+
         <button onclick="changeDriverPassword()" style="padding:10px 14px;">
           Update password
         </button>
@@ -615,10 +622,21 @@ async function loadLoggedInDriverPanel() {
 (window as any).changeDriverPassword = async function () {
   const currentPassword = (document.getElementById("currentDriverPassword") as HTMLInputElement).value;
   const newPassword = (document.getElementById("newDriverPassword") as HTMLInputElement).value;
+  const confirmPassword = (document.getElementById("confirmDriverPassword") as HTMLInputElement).value;
   const msg = document.getElementById("driverPasswordMessage");
 
-  if (!currentPassword || !newPassword) {
-    if (msg) msg.innerHTML = "❌ Enter both passwords";
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    if (msg) msg.innerHTML = "❌ Fill in all password fields";
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    if (msg) msg.innerHTML = "❌ New passwords do not match";
+    return;
+  }
+
+  if (newPassword.length < 6) {
+    if (msg) msg.innerHTML = "❌ New password must be at least 6 characters";
     return;
   }
 
@@ -638,9 +656,11 @@ async function loadLoggedInDriverPanel() {
 
       const currentInput = document.getElementById("currentDriverPassword") as HTMLInputElement;
       const newInput = document.getElementById("newDriverPassword") as HTMLInputElement;
+      const confirmInput = document.getElementById("confirmDriverPassword") as HTMLInputElement;
 
       if (currentInput) currentInput.value = "";
       if (newInput) newInput.value = "";
+      if (confirmInput) confirmInput.value = "";
     } else {
       if (msg) msg.innerHTML = `❌ ${data.error || "Could not update password"}`;
     }
