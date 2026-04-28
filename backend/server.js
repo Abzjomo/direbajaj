@@ -24,6 +24,15 @@ if (!ADMIN_PASSWORD || !JWT_SECRET || !MONGODB_URI) {
    SCHEMAS
 ========================= */
 
+const customerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    phone: { type: String, required: true, unique: true },
+    passwordHash: { type: String, required: true },
+  },
+  { timestamps: true }
+);
+
 const driverSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, unique: true },
@@ -38,13 +47,20 @@ const bookingSchema = new mongoose.Schema(
   {
     from: { type: String, required: true },
     to: { type: String, required: true },
+
     driverId: { type: mongoose.Schema.Types.ObjectId, ref: "Driver", required: true },
     driver: { type: String, required: true },
+
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: "Customer", default: null },
+    customerName: { type: String, default: null },
+    customerPhone: { type: String, default: null },
+
     status: { type: String, enum: ["assigned", "completed"], default: "assigned" },
   },
   { timestamps: true }
 );
 
+const Customer = mongoose.model("Customer", customerSchema);
 const Driver = mongoose.model("Driver", driverSchema);
 const Booking = mongoose.model("Booking", bookingSchema);
 
@@ -62,6 +78,19 @@ function createDriverToken(driver) {
       role: "driver",
       driverId: String(driver._id),
       name: driver.name,
+    },
+    JWT_SECRET,
+    { expiresIn: "8h" }
+  );
+}
+
+function createCustomerToken(customer) {
+  return jwt.sign(
+    {
+      role: "customer",
+      customerId: String(customer._id),
+      name: customer.name,
+      phone: customer.phone,
     },
     JWT_SECRET,
     { expiresIn: "8h" }
@@ -118,6 +147,53 @@ function verifyDriver(req, res, next) {
   }
 }
 
+function verifyCustomer(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ ok: false, error: "Missing customer token" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.role !== "customer") {
+      return res.status(403).json({ ok: false, error: "Not authorized" });
+    }
+
+    req.customer = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ ok: false, error: "Invalid or expired token" });
+  }
+}
+
+function optionalCustomer(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    req.customer = null;
+    return next();
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role === "customer") {
+      req.customer = decoded;
+    } else {
+      req.customer = null;
+    }
+  } catch {
+    req.customer = null;
+  }
+
+  next();
+}
+
 /* =========================
    SEED
 ========================= */
@@ -139,14 +215,17 @@ async function seedDriversIfEmpty() {
 }
 
 /* =========================
-   ROUTES
+   BASIC
 ========================= */
 
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-/* ADMIN */
+/* =========================
+   ADMIN
+========================= */
+
 app.post("/admin-login", (req, res) => {
   const { password } = req.body || {};
 
@@ -168,7 +247,10 @@ app.get("/admin-check", verifyAdmin, (req, res) => {
   res.json({ ok: true, admin: true });
 });
 
-/* DRIVER */
+/* =========================
+   DRIVER
+========================= */
+
 app.post("/driver-login", async (req, res) => {
   try {
     const { driverId, password } = req.body || {};
@@ -270,6 +352,9 @@ app.get("/driver-bookings", verifyDriver, async (req, res) => {
         to: b.to,
         driverId: b.driverId,
         driver: b.driver,
+        customerId: b.customerId,
+        customerName: b.customerName,
+        customerPhone: b.customerPhone,
         status: b.status,
       }))
     );
@@ -304,7 +389,130 @@ app.post("/driver-complete-booking/:id", verifyDriver, async (req, res) => {
   }
 });
 
-/* DATA */
+/* =========================
+   CUSTOMER
+========================= */
+
+app.post("/customer-register", async (req, res) => {
+  try {
+    const { name, phone, password } = req.body || {};
+
+    if (!name || !phone || !password) {
+      return res.status(400).json({ ok: false, error: "Name, phone and password are required" });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ ok: false, error: "Password must be at least 6 characters" });
+    }
+
+    const existing = await Customer.findOne({ phone });
+    if (existing) {
+      return res.status(400).json({ ok: false, error: "Customer already exists" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const customer = await Customer.create({
+      name,
+      phone,
+      passwordHash,
+    });
+
+    res.json({
+      ok: true,
+      token: createCustomerToken(customer),
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        phone: customer.phone,
+      },
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not register customer" });
+  }
+});
+
+app.post("/customer-login", async (req, res) => {
+  try {
+    const { phone, password } = req.body || {};
+
+    if (!phone || !password) {
+      return res.status(400).json({ ok: false, error: "Phone and password are required" });
+    }
+
+    const customer = await Customer.findOne({ phone });
+
+    if (!customer) {
+      return res.status(404).json({ ok: false, error: "Customer not found" });
+    }
+
+    const ok = await bcrypt.compare(password, customer.passwordHash);
+
+    if (!ok) {
+      return res.status(401).json({ ok: false, error: "Wrong customer password" });
+    }
+
+    res.json({
+      ok: true,
+      token: createCustomerToken(customer),
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        phone: customer.phone,
+      },
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not log in customer" });
+  }
+});
+
+app.get("/customer-check", verifyCustomer, async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.customer.customerId);
+
+    if (!customer) {
+      return res.status(404).json({ ok: false, error: "Customer not found" });
+    }
+
+    res.json({
+      ok: true,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        phone: customer.phone,
+      },
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not verify customer" });
+  }
+});
+
+app.get("/customer-bookings", verifyCustomer, async (req, res) => {
+  try {
+    const bookings = await Booking.find({ customerId: req.customer.customerId }).sort({ createdAt: -1 });
+
+    res.json(
+      bookings.map((b) => ({
+        id: b._id,
+        from: b.from,
+        to: b.to,
+        driverId: b.driverId,
+        driver: b.driver,
+        customerId: b.customerId,
+        customerName: b.customerName,
+        customerPhone: b.customerPhone,
+        status: b.status,
+      }))
+    );
+  } catch {
+    res.status(500).json({ ok: false, error: "Could not load customer bookings" });
+  }
+});
+
+/* =========================
+   DATA
+========================= */
+
 app.get("/drivers", async (req, res) => {
   try {
     const drivers = await Driver.find().sort({ createdAt: 1 });
@@ -333,6 +541,9 @@ app.get("/bookings", async (req, res) => {
         to: b.to,
         driverId: b.driverId,
         driver: b.driver,
+        customerId: b.customerId,
+        customerName: b.customerName,
+        customerPhone: b.customerPhone,
         status: b.status,
       }))
     );
@@ -341,8 +552,11 @@ app.get("/bookings", async (req, res) => {
   }
 });
 
-/* BOOKING */
-app.post("/book", async (req, res) => {
+/* =========================
+   BOOKING
+========================= */
+
+app.post("/book", optionalCustomer, async (req, res) => {
   try {
     const { from, to, driverId } = req.body || {};
 
@@ -372,11 +586,27 @@ app.post("/book", async (req, res) => {
     selectedDriver.status = "busy";
     await selectedDriver.save();
 
+    let customerId = null;
+    let customerName = null;
+    let customerPhone = null;
+
+    if (req.customer?.customerId) {
+      const customer = await Customer.findById(req.customer.customerId);
+      if (customer) {
+        customerId = customer._id;
+        customerName = customer.name;
+        customerPhone = customer.phone;
+      }
+    }
+
     const booking = await Booking.create({
       from,
       to,
       driverId: selectedDriver._id,
       driver: selectedDriver.name,
+      customerId,
+      customerName,
+      customerPhone,
       status: "assigned",
     });
 
@@ -388,6 +618,9 @@ app.post("/book", async (req, res) => {
         to: booking.to,
         driverId: booking.driverId,
         driver: booking.driver,
+        customerId: booking.customerId,
+        customerName: booking.customerName,
+        customerPhone: booking.customerPhone,
         status: booking.status,
       },
     });
@@ -396,7 +629,10 @@ app.post("/book", async (req, res) => {
   }
 });
 
-/* ADMIN ACTIONS */
+/* =========================
+   ADMIN ACTIONS
+========================= */
+
 app.post("/complete-booking/:id", verifyAdmin, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
